@@ -8,6 +8,8 @@ section .data
     sockaddr_in_len equ $-sockaddr_in
 
     listen_backlog db 5
+    max_clients equ 10
+    max_fds equ max_clients + 1 ; +1 for server socket
 
     listen_msg db "Listening on port 8080...", 0x0A, 0x00
     listen_msg_len equ $-listen_msg
@@ -18,7 +20,7 @@ section .data
 ; reserve space for variables here
 section .bss
     buffer resb 1024
-    pollfds resb 16 ; struct pollfd[2]
+    pollfds resb 8 * max_fds
 
 ; declare functions here
 section .text
@@ -42,6 +44,18 @@ _main:
     mov rsi, listen_backlog
     call listen
 
+    ; add server socket to pollfds
+    mov dword [pollfds], r8d
+    mov word [pollfds + 4], 0x001 ; POLLIN
+
+; main loop to handle incoming connections and client messages
+.main_loop:
+    call poll
+
+    mov ax, word [pollfds + 6] ; revents for server socket
+    test ax, 0x001 ; check if POLLIN is set
+    jz .handle_clients ; if not, check client sockets
+
     mov rdi, r8
     call accept
     mov r9, rax ; store client socket fd in r9
@@ -50,56 +64,100 @@ _main:
     mov rsi, accept_msg_len
     call print
 
-.add_client:
-    mov dword [pollfds], 0 ; stdin
-    mov word [pollfds + 4], 0x001 ; POLLIN
-    mov word [pollfds + 6], 0 ; revents
+    ; add new client socket to pollfds
+    mov r12, 1
+    jmp .find_empty_slot
 
-    mov dword [pollfds + 8], r9d ; client socket
-    mov word [pollfds + 12], 0x001 ; POLLIN
-    mov word [pollfds + 14], 0 ; revents
+; loop to handle client messages
+.handle_clients:
+    mov r12, 1
+    jmp .client_loop
 
-.chat_loop:
-    call poll
+.next_client:
+    inc r12
+    jmp .client_loop
 
-    mov ax, word [pollfds + 6] ; revents for stdin
+.client_loop:
+    cmp r12, max_fds
+    jge .main_loop ; if we exceed max_fds, go back to main loop
+
+    mov rbx, r12
+    shl rbx, 3 ; offset for pollfd struct
+
+    mov r14d, dword [pollfds + rbx] ; fd for this client
+    cmp r14d, 0 ; check if slot is empty
+    jle .next_client ; if empty, check next client
+
+    mov ax, word [pollfds + rbx + 6] ; revents for client socket
     test ax, 0x001 ; check if POLLIN is set
-    jz .check_network
+    jz .next_client ; if not, check next client
 
     mov rax, 0
-    mov rdi, 0
+    mov rdi, r14
     mov rsi, buffer
     mov rdx, 1024
-    syscall
+    syscall ; read from client
+
     cmp rax, 0
-    jle .exit
+    jle .close_client
 
-    mov rdx, rax
+    mov r15, rax
+    mov word [pollfds + rbx + 6], 0 ; clear revents for this client
+    mov r13, 1
+    jmp .broadcast
+
+.close_client:
+    mov rax, 3
+    mov rdi, r14
+    syscall ; close client socket
+
+    mov rbx, r12
+    shl rbx, 3
+    mov dword [pollfds + rbx], 0 ; clear fd
+    mov word [pollfds + rbx + 4], 0 ; clear events
+    mov word [pollfds + rbx + 6], 0 ; clear revents
+    jmp .next_client
+
+; loop to broadcast message to all clients except the sender
+.next_broadcast:
+    inc r13
+    jmp .broadcast
+    
+.broadcast:
+    cmp r13, max_fds
+    jge .next_client
+
+    mov rbx, r13
+    shl rbx, 3
+
+    mov edi, dword [pollfds + rbx] ; fd for this client
+    cmp edi, 0
+    jle .next_broadcast
+
     mov rax, 1
-    mov rdi, 1
-    syscall
-
-    jmp .chat_loop
-
-.check_network:
-    mov ax, word [pollfds + 14]
-    test ax, 0x001 ; check if POLLIN is set
-    jz .chat_loop
-
-    mov rax, 0
-    mov rdi, r9
     mov rsi, buffer
-    mov rdx, 1024
-    syscall
-    cmp rax, 0
-    jle .exit
+    mov rdx, r15
+    syscall ; write to client
+    jmp .next_broadcast
 
-    mov rdx, rax
-    mov rax, 1
-    mov rdi, 1
-    syscall
+; find an empty slot in pollfds to add the new client socket
+.next_slot:
+    inc r12
+    jmp .find_empty_slot
 
-    jmp .chat_loop
+.find_empty_slot:
+    cmp r12, max_fds
+    jge .handle_clients ; if we exceed max_fds, just check clients without adding
+
+    mov rbx, r12
+    shl rbx, 3 ; offset for pollfd struct
+
+    cmp dword [pollfds + rbx], 0 ; check if fd is 0 (empty slot)
+    jne .next_slot ; if not empty, check next slot
+
+    mov dword [pollfds + rbx], r9d ; store client fd
+    mov word [pollfds + rbx + 4], 0x001 ; POLLIN (events)
+    jmp .handle_clients
 
 .exit:
     mov rax, 60
@@ -143,7 +201,7 @@ accept:
 poll:
     mov rax, 7
     mov rdi, pollfds
-    mov rsi, 2
+    mov rsi, max_fds
     mov rdx, -1 ; timeout: infinite
     syscall
     ret
