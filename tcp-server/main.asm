@@ -24,10 +24,10 @@ section .bss
 
 ; declare functions here
 section .text
-    global _main
+    global _start
 
 ; entry point of the program
-_main:
+_start:
     call socket
     mov r8, rax ; store socket fd in r8
 
