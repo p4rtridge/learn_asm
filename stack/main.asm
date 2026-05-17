@@ -11,11 +11,16 @@ section .text
 
 _start:
     call print_rsp
+    call some_function
 
     ; Exit the program
     mov rax, 60               ; sys_exit
     xor rdi, rdi              ; status 0
     syscall
+
+some_function:
+    call print_rsp
+    ret
 
 print_rsp:
     lea rax, [rsp + 8]
