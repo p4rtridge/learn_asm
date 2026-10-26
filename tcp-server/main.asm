@@ -182,7 +182,7 @@ bind:
     ret
 
 ; listen(int sockfd, int backlog)
-; returns: 0 on success, -1 on error
+; return: 0 on success, -1 on error
 listen:
     mov rax, 50
     syscall
